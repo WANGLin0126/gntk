@@ -1,5 +1,6 @@
 import math
 import numpy as np
+import torch
 import scipy as sp
 
 class GNTK(object):
@@ -24,12 +25,12 @@ class GNTK(object):
         go through one normal layer, for diagonal element
         S: covariance of last layer
         """
-        diag = np.sqrt(np.diag(S))
+        diag = torch.sqrt(torch.diag(S))
         S = S / diag[:, None] / diag[None, :]
-        S = np.clip(S, -1, 1)
+        S = torch.clip(S, -1, 1)
         # dot sigma
-        DS = (math.pi - np.arccos(S)) / math.pi
-        S = (S * (math.pi - np.arccos(S)) + np.sqrt(1 - S * S)) / np.pi
+        DS = (math.pi - torch.arccos(S)) / math.pi
+        S = (S * (math.pi - torch.arccos(S)) + torch.sqrt(1 - S * S)) / torch.pi
         S = S * diag[:, None] * diag[None, :]
         return S, DS, diag
 
@@ -41,16 +42,43 @@ class GNTK(object):
         N: number of vertices
         scale_mat: scaling matrix
         """
-        return adj_block.dot(S.reshape(-1)).reshape(N, N) * scale_mat
+        return torch.sparse.mm(adj_block, S.reshape(-1,1)).reshape(N, N) * scale_mat
+
+    def sparse_kron(self, A, B):
+        """
+        A, B: torch.sparse.FloatTensor of shape (m, n) and (p, q)
+        Returns: the Kronecker product of A and B
+        """
+        A = A.coalesce()
+        B = B.coalesce()
+        m, n = A.shape
+        p, q = B.shape
+        n_A  = A._nnz()
+        n_B  = B._nnz()
+
+        indices_A = A.indices()
+        indices_B = B.indices()
+        indices_A[0,:] = indices_A[0,:] * p
+        indices_A[1,:] = indices_A[1,:] * q
+
+        indices = (indices_A.repeat(n_B, 1) + indices_B.t().reshape(2*n_B,1))
+        ind_row = indices.index_select(0,torch.arange(start = 0, end = 2*n_B, step = 2, device=A.device) ).reshape(-1)
+        ind_col = indices.index_select(0,torch.arange(start = 1, end = 2*n_B, step = 2, device=A.device) ).reshape(-1)
+
+        new_ind = torch.cat((ind_row, ind_col)).reshape(2, n_A*n_B)
+        values = torch.ones(n_A*n_B).to(A.device)
+        new_shape = (m * p, n * q)
+        
+        return torch.sparse_coo_tensor(new_ind, values, new_shape)
 
     def __next(self, S, diag1, diag2):
         """
         go through one normal layer, for all elements
         """
         S = S / diag1[:, None] / diag2[None, :]
-        S = np.clip(S, -1, 1)
-        DS = (math.pi - np.arccos(S)) / math.pi
-        S = (S * (math.pi - np.arccos(S)) + np.sqrt(1 - S * S)) / np.pi
+        S = torch.clip(S, -1, 1)
+        DS = (torch.pi - torch.arccos(S)) / math.pi
+        S = (S * (math.pi - torch.arccos(S)) + torch.sqrt(1 - S * S)) / torch.pi
         S = S * diag1[:, None] * diag2[None, :]
         return S, DS
     
@@ -58,7 +86,7 @@ class GNTK(object):
         """
         go through one adj layer, for all elements
         """
-        return adj_block.dot(S.reshape(-1)).reshape(N1, N2) * scale_mat
+        return torch.sparse.mm(adj_block,S.reshape(-1,1)).reshape(N1, N2) * scale_mat
       
     def diag(self, g, A):
         """
@@ -67,18 +95,19 @@ class GNTK(object):
         A: adjacency matrix
         """
         N = A.shape[0]
+        aggr_optor = self.sparse_kron(A, A)
         if self.scale == 'uniform':
             scale_mat = 1.
         else:
-            scale_mat = 1. / np.array(np.sum(A, axis=1) * np.sum(A, axis=0))
+            scale_mat = (1./torch.sparse.sum(aggr_optor,1).to_dense()).reshape(N,N)
 
         diag_list = []
-        adj_block = sp.sparse.kron(A, A)
+        adj_block = self.sparse_kron(A, A)
 
         # input covariance
-        sigma = np.matmul(g.node_features, g.node_features.T)
+        sigma = torch.matmul(g.node_features, g.node_features.T)
         sigma = self.__adj_diag(sigma, adj_block, N, scale_mat)
-        ntk = np.copy(sigma)
+        ntk = sigma.clone()
 		
         
         for layer in range(1, self.num_layers):
@@ -104,18 +133,18 @@ class GNTK(object):
         n1 = A1.shape[0]
         n2 = A2.shape[0]
         
+        adj_block = self.sparse_kron(A1, A2)
+
         if self.scale == 'uniform':
             scale_mat = 1.
         else:
-            scale_mat = 1. / np.array(np.sum(A1, axis=1) * np.sum(A2, axis=0))
-        
-        adj_block = sp.sparse.kron(A1, A2)
+            scale_mat = (1./torch.sparse.sum(adj_block,1).to_dense()).reshape(n1,n2)
         
         jump_ntk = 0
-        sigma = np.matmul(g1.node_features, g2.node_features.T)
+        sigma = torch.matmul(g1.node_features, g2.node_features.T)
         jump_ntk += sigma
         sigma = self.__adj(sigma, adj_block, n1, n2, scale_mat)
-        ntk = np.copy(sigma)
+        ntk = sigma.clone()
         
         for layer in range(1, self.num_layers):
             for mlp_layer in range(self.num_mlp_layers):
@@ -129,6 +158,6 @@ class GNTK(object):
                 sigma = self.__adj(sigma, adj_block, n1, n2, scale_mat)
                 ntk = self.__adj(ntk, adj_block, n1, n2, scale_mat)
         if self.jk:
-            return np.sum(jump_ntk) * 2
+            return torch.sum(jump_ntk) * 2
         else:
-            return np.sum(ntk) * 2
+            return torch.sum(ntk) * 2

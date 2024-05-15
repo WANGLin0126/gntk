@@ -2,9 +2,10 @@ import networkx as nx
 import numpy as np
 import random
 from sklearn.model_selection import StratifiedKFold
+import torch
 
 class S2VGraph(object):
-    def __init__(self, g, label, node_tags=None, node_features=None):
+    def __init__(self, g, label, node_tags=None, node_features=None, device= 'cuda:0'):
         '''
             g: a networkx graph
             label: an integer graph label
@@ -16,8 +17,8 @@ class S2VGraph(object):
         self.g = g
         self.node_tags = node_tags
         self.neighbors = []
-        self.node_features = 0
-
+        self.node_features = torch.tensor(0).to(device)
+        self.device = device
         self.max_neighbor = 0
 
 
@@ -61,7 +62,7 @@ def load_data(dataset, degree_as_tag):
                 node_tags.append(feat_dict[row[0]])
 
                 if tmp > len(row):
-                    node_features.append(attr)
+                    node_features.append(torch.tensor(attr).to("cuda:0"))
 
                 n_edges += row[1]
                 for k in range(2, len(row)):
@@ -110,14 +111,13 @@ def load_data(dataset, degree_as_tag):
     tag2index = {tagset[i]:i for i in range(len(tagset))}
 
     for g in g_list:
-        g.node_features = np.zeros([len(g.node_tags), len(tagset)])
+        g.node_features = torch.zeros([len(g.node_tags), len(tagset)]).to('cuda:0')
         g.node_features[range(len(g.node_tags)), [tag2index[tag] for tag in g.node_tags]] = 1
 
-
+    print('dataset: %s' % dataset)
     print('# classes: %d' % len(label_dict))
     print('# maximum node tag: %d' % len(tagset))
-
-    print("# data: %d" % len(g_list))
+    print("# graphs: %d" % len(g_list))
 
     return g_list, len(label_dict)
 
